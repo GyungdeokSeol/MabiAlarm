@@ -3,8 +3,8 @@ from discord.ext import tasks, commands
 import requests
 from bs4 import BeautifulSoup
 import json
-import os
 from dotenv import load_dotenv
+import os
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
