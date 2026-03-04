@@ -3,8 +3,8 @@ from discord.ext import tasks, commands
 import requests
 from bs4 import BeautifulSoup
 import json
-from dotenv import load_dotenv
 import os
+from dotenv import load_dotenv
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -22,12 +22,14 @@ def save_channel_id(channel_id):
     with open(CONFIG_FILE, 'w') as f:
         json.dump({'channel_id': channel_id}, f)
 
-# --- [새로 추가된 부분] 공지 크롤링 전용 함수 ---
-def get_latest_notice():
+# --- [수정됨] 1페이지의 모든 공지사항을 가져오는 함수 ---
+def fetch_all_notices():
     url = "https://mabinogi.nexon.com/page/news/notice_list.asp"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
+    notices = [] # 공지사항들을 담을 빈 리스트
+    
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -46,13 +48,14 @@ def get_latest_notice():
             else:
                 link = f"https://mabinogi.nexon.com{raw_link if raw_link.startswith('/') else '/page/news/' + raw_link}"
             
-            # 가장 최신 글 1개의 제목과 링크만 찾아서 바로 넘겨줍니다.
-            return title, link
+            # (제목, 링크) 세트로 묶어서 리스트에 추가합니다.
+            notices.append((title, link))
+            
+        return notices
             
     except Exception as e:
         print(f"크롤링 오류 발생: {e}")
-        
-    return None, None
+        return []
 # ---------------------------------------------
 
 intents = discord.Intents.default()
@@ -77,13 +80,13 @@ async def set_channel(interaction: discord.Interaction):
     target_channel_id = current_channel.id 
     save_channel_id(current_channel.id) 
     
-    # 1. 안내 메시지 먼저 전송
     await interaction.response.send_message(f"✅ 알림 채널이 {current_channel.mention}로 설정되었습니다!\n작동 확인을 위해 최신 공지를 불러옵니다 🚀")
     
-    # 2. [추가된 부분] 채널 설정 즉시 최신 공지를 가져와서 '연결 테스트'로 띄워줍니다.
-    title, link = get_latest_notice()
-    if title and link:
-        last_notice_link = link  # 이 글을 마지막 글로 기억합니다.
+    # 전체 공지사항 중 첫 번째(가장 최신) 글만 가져와서 테스트용으로 띄웁니다.
+    notices = fetch_all_notices()
+    if notices:
+        title, link = notices[0]
+        last_notice_link = link  
         await current_channel.send(f"📢 **[연결 테스트] 현재 최신 공지사항**\n**{title}**\n{link}")
     else:
         await current_channel.send("⚠️ 공지사항을 불러오는 데 실패했습니다.")
@@ -95,23 +98,38 @@ async def check_notices():
     if target_channel_id is None:
         return
 
-    # 크롤링 함수를 불러와서 최신 글을 확인합니다.
-    title, link = get_latest_notice()
-    
-    if title and link:
-        # (봇이 재시작되었을 때 등) 처음 상태라면 조용히 기억만 하고 넘어갑니다.
-        if last_notice_link == "":
-            last_notice_link = link
-            print(f"초기화 완료. 최신 공지: {title}")
-            return
+    notices = fetch_all_notices()
+    if not notices:
+        return
 
-        # 기억하고 있던 링크와 다르다면 (새 글이 올라왔다면)
-        if link != last_notice_link:
-            channel = bot.get_channel(target_channel_id)
-            if channel:
+    # 처음 시작 시: 제일 최신 글 하나만 기억하고 종료
+    if last_notice_link == "":
+        last_notice_link = notices[0][1]
+        print(f"초기화 완료. 최신 공지: {notices[0][0]}")
+        return
+
+    new_notices = []
+    # 목록을 위에서부터 차례대로 확인합니다.
+    for title, link in notices:
+        if link == last_notice_link:
+            # 기억하던 링크를 만나면, 그 아래는 이미 올린 옛날 글이므로 반복을 멈춥니다.
+            break
+        # 기억하던 링크가 아니라면 새 글이므로 임시 보관함에 넣습니다.
+        new_notices.append((title, link))
+    
+    # 새 글이 1개라도 있다면 디스코드에 전송합니다.
+    if new_notices:
+        channel = bot.get_channel(target_channel_id)
+        if channel:
+            # 먼저 올라온 공지가 먼저 전송되도록 리스트 순서를 뒤집습니다. (오래된 순 -> 최신 순)
+            new_notices.reverse() 
+            
+            for title, link in new_notices:
                 await channel.send(f"🚨 **마비노기 새 공지사항** 🚨\n**{title}**\n{link}")
-            last_notice_link = link
-            print(f"새 공지사항 전송 완료: {title}")
+        
+        # 마지막으로 디스코드에 보낸 가장 최신 글(리스트의 맨 마지막 요소)을 기억합니다.
+        last_notice_link = new_notices[-1][1]
+        print(f"{len(new_notices)}개의 새 공지사항 전송 완료")
 
 @bot.event
 async def on_ready():
